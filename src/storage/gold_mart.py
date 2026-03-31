@@ -1,9 +1,9 @@
 import duckdb
-
+import os
 DB_PATH = "data/silver/synapse.db"
 
 def build_gold_mart(exp_config):
-
+    os.makedirs("data/silver",exist_ok=True)
     con = duckdb.connect(DB_PATH)
 
     domain = exp_config.domain
