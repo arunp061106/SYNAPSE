@@ -1,11 +1,16 @@
 import duckdb
-import warnings
-warnings.filterwarnings("ignore")
-
-from sdv.single_table import CTGANSynthesizer
-from sdv.metadata import SingleTableMetadata
+import pandas as pd
+import numpy as np
 
 DB_PATH = "data/silver/synapse.db"
+
+# ---------------- OPTIONAL SDV ----------------
+try:
+    from sdv.single_table import CTGANSynthesizer
+    SDV_AVAILABLE = True
+except:
+    SDV_AVAILABLE = False
+
 
 TABLE_MAP = {
     "ecommerce": "gold_ecommerce",
@@ -14,54 +19,59 @@ TABLE_MAP = {
 }
 
 
+def generate_synthetic(exp_config):
 
-def generate_synthetic(exp_config, return_model=False):
-
-    # 🔌 Connect DB
     con = duckdb.connect(DB_PATH)
 
     table = TABLE_MAP[exp_config.domain]
 
-    # 📥 Load real data
     df = con.execute(f"SELECT * FROM {table}").df()
+
     con.close()
 
-    if df.empty:
-        raise ValueError("❌ Gold table is empty. Cannot generate synthetic data.")
+    if df is None or df.empty:
+        print("⚠️ No data found for synthetic generation")
+        return pd.DataFrame()
 
-    print("\n📊 Real dataset shape:", df.shape)
+    # ---------------- SIZE ----------------
+    num_rows = int(len(df) * exp_config.synthetic_ratio)
 
-    # 🧠 Build metadata
-    metadata = SingleTableMetadata()
-    metadata.detect_from_dataframe(df)
+    # ---------------- SDV PATH ----------------
+    if SDV_AVAILABLE:
+        try:
+            print("🚀 Using CTGAN (SDV)")
 
-    # ⚙️ Model configuration (balanced for quality + speed)
-    print("\n🚀 Starting synthetic training...")
+            model = CTGANSynthesizer()
+            model.fit(df)
 
-    model = CTGANSynthesizer(
-        metadata,
-        epochs=20,          # 🔥 increase for better learning
-        verbose=True
-    )
+            synthetic = model.sample(num_rows)
 
-    model.fit(df)
+        except Exception as e:
+            print("⚠️ SDV failed, switching to fallback:", e)
+            synthetic = fallback_generation(df, num_rows)
 
-    print("✅ Finished synthetic training")
+    else:
+        print("⚠️ SDV not available, using fallback")
+        synthetic = fallback_generation(df, num_rows)
 
-    # 🎯 Synthetic size control
-    synth_size = int(len(df) * exp_config.synthetic_ratio)
+    return synthetic
 
-    print(f"\n📦 Generating {synth_size} synthetic rows...")
 
-    synthetic_df = model.sample(synth_size)
+# ---------------- FALLBACK GENERATOR ----------------
+def fallback_generation(df, num_rows):
 
-    print("✅ Synthetic generation complete")
+    synthetic = df.sample(n=num_rows, replace=True).reset_index(drop=True)
 
-    # 🔍 Basic sanity check
-    print("\n📊 Synthetic dataset shape:", synthetic_df.shape)
+    # 🔥 Add small noise to numeric columns
+    numeric_cols = synthetic.select_dtypes(include="number").columns
 
-    # Optional: return model for reuse (UI optimization later)
-    if return_model:
-        return synthetic_df, model
+    for col in numeric_cols:
+        noise = np.random.normal(0, 0.01, size=len(synthetic))
+        synthetic[col] = synthetic[col] * (1 + noise)
 
-    return synthetic_df
+    # 🔥 Ensure target columns still valid (0/1)
+    for target in ["fraud", "is_purchase", "anomaly"]:
+        if target in synthetic.columns:
+            synthetic[target] = synthetic[target].round().clip(0, 1)
+
+    return synthetic
